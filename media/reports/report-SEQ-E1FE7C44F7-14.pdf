@@ -1,0 +1,71 @@
+%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Count 1 /Kids [3 0 R] >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>
+endobj
+4 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+5 0 obj
+<< /Length 717 >>
+stream
+BT
+/F1 11 Tf
+50 790 Td
+14 TL
+(GMO Detection - Diagnostic Report) Tj
+T*
+(Generated: 2026-03-15 13:20 UTC) Tj
+T*
+() Tj
+T*
+(Sequence: tilapia du Nile) Tj
+T*
+(Sequence ID: SEQ-E1FE7C44F7) Tj
+T*
+(Predicted label: gmo) Tj
+T*
+(Confidence: 0.5309) Tj
+T*
+(GMO probability: 0.5309) Tj
+T*
+(Non-GMO probability: 0.4691) Tj
+T*
+(Chunks processed: 3) Tj
+T*
+() Tj
+T*
+(Top attention segments:) Tj
+T*
+(1. 774-792 | score=0.9933 | GGCGGTTGCGGGCCGGCT) Tj
+T*
+(2. 729-747 | score=0.8022 | GTCGCCGGGAATGCGGAC) Tj
+T*
+(3. 747-765 | score=0.7711 | GGTTCCGGAAAGGCCAGA) Tj
+T*
+(4. 1126-1144 | score=0.7711 | ATGACCGGTTGGGCCATC) Tj
+T*
+(5. 711-729 | score=0.6911 | CCGGTGGGAGATCGACTT) Tj
+T*
+(6. 1333-1351 | score=0.6911 | GTGGGCCTATTCACCCAC) Tj
+ET
+endstream
+endobj
+xref
+0 6
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000115 00000 n 
+0000000241 00000 n 
+0000000311 00000 n 
+trailer
+<< /Size 6 /Root 1 0 R >>
+startxref
+1078
+%%EOF

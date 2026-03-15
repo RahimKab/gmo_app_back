@@ -1,15 +1,24 @@
 from rest_framework import serializers
 
-from .models import Sequence
+from .models import Prediction, Report, Sequence
 
 
-class SequenceCreateSerializer(serializers.ModelSerializer):
+class SequenceCreateSerializer(serializers.Serializer):
+    seq_nom = serializers.CharField(required=False, allow_blank=True)
+    seq_nom_courant = serializers.CharField(required=False, allow_blank=True)
     sequence = serializers.CharField(required=False, allow_blank=True)
     file = serializers.FileField(required=False)
 
     def validate(self, attrs):
-        if not attrs.get('sequence') and not attrs.get('file'):
-            raise serializers.ValidationError('Inserer une sequence ou un fichier.')
+        has_sequence = bool((attrs.get('sequence') or '').strip())
+        has_file = bool(attrs.get('file'))
+
+        if not has_sequence and not has_file:
+            raise serializers.ValidationError('Choisissez une seule source: sequence brute ou fichier.')
+
+        if has_sequence and has_file:
+            raise serializers.ValidationError('Vous devez choisir soit la sequence brute, soit le fichier, pas les deux.')
+
         return attrs
 
 
@@ -29,3 +38,62 @@ class SequenceSerializer(serializers.ModelSerializer):
             'user',
         ]
         read_only_fields = fields
+
+
+class PredictionSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Prediction
+        fields = ['prediction_id', 'pred_libelle', 'pred_prob', 'pred_confiance', 'pred_date']
+        read_only_fields = fields
+
+
+class AttentionSegmentSerializer(serializers.Serializer):
+    start = serializers.IntegerField()
+    end = serializers.IntegerField()
+    sequence = serializers.CharField()
+    score = serializers.FloatField()
+
+
+class ProbabilitySerializer(serializers.Serializer):
+    gmo = serializers.FloatField()
+    no_gmo = serializers.FloatField()
+
+
+class SequencePredictionResponseSerializer(serializers.Serializer):
+    sequence = SequenceSerializer()
+    prediction = PredictionSerializer()
+    predicted_label = serializers.CharField()
+    probabilities = ProbabilitySerializer()
+    attention = AttentionSegmentSerializer(many=True)
+    chunks_processed = serializers.IntegerField(default=1)
+
+
+class ReportSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Report
+        fields = [
+            'report_id',
+            'predicted_label',
+            'gmo_probability',
+            'no_gmo_probability',
+            'chunks_processed',
+            'pdf_path',
+            'created_at',
+        ]
+        read_only_fields = fields
+
+
+class UserPredictionSummarySerializer(serializers.Serializer):
+    sequence = SequenceSerializer()
+    prediction = PredictionSerializer()
+    report = ReportSerializer()
+
+
+class UserPredictionDetailSerializer(serializers.Serializer):
+    sequence = SequenceSerializer()
+    prediction = PredictionSerializer()
+    predicted_label = serializers.CharField()
+    probabilities = ProbabilitySerializer()
+    attention = AttentionSegmentSerializer(many=True)
+    chunks_processed = serializers.IntegerField(default=1)
+    report = ReportSerializer()

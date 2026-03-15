@@ -46,3 +46,25 @@ class Prediction(models.Model):
 
     def __str__(self):
         return f"{self.pred_libelle} ({self.pred_prob})"
+
+
+class Report(models.Model):
+    report_id = models.AutoField(primary_key=True)
+    prediction = models.OneToOneField(
+        Prediction,
+        on_delete=models.CASCADE,
+        related_name='report',
+    )
+    predicted_label = models.CharField(max_length=20)
+    gmo_probability = models.FloatField()
+    no_gmo_probability = models.FloatField()
+    attention = models.JSONField(default=list)
+    chunks_processed = models.IntegerField(default=1)
+    pdf_path = models.CharField(max_length=500)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f'Report #{self.report_id} for {self.prediction.sequence.seq_id}'

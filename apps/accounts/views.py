@@ -43,24 +43,28 @@ class LoginAPIView(APIView):
 	permission_classes = [AllowAny]
 
 	def post(self, request):
+		username = request.data.get('username', '').strip()
 		email = request.data.get('email', '').strip()
 		password = request.data.get('password', '')
 
-		if not email or not password:
+		if not password or (not username and not email):
 			return Response(
-				{'detail': 'Email et mot de passe sont requis.'},
+				{'detail': "Nom d'utilisateur (ou email) et mot de passe sont requis."},
 				status=status.HTTP_400_BAD_REQUEST,
 			)
 
-		try:
-			user_obj = User.objects.get(email=email)
-		except User.DoesNotExist:
-			return Response(
-				{'detail': 'Identifiants invalides.'},
-				status=status.HTTP_400_BAD_REQUEST,
-			)
+		# Priorite au login par nom d'utilisateur.
+		login_username = username
+		if not login_username and email:
+			try:
+				login_username = User.objects.get(email=email).username
+			except User.DoesNotExist:
+				return Response(
+					{'detail': 'Identifiants invalides.'},
+					status=status.HTTP_400_BAD_REQUEST,
+				)
 
-		user = authenticate(request, username=user_obj.username, password=password)
+		user = authenticate(request, username=login_username, password=password)
 		if not user:
 			return Response(
 				{'detail': 'Identifiants invalides.'},
