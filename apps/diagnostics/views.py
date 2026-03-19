@@ -15,7 +15,7 @@ from .serializers import (
     UserPredictionDetailSerializer,
     UserPredictionSummarySerializer,
 )
-from .services.inference import InferenceService
+from .services.inference import get_inference_service
 from .services.preprocess import clean_sequence, extract_sequence_from_text
 from .services.report_pdf import build_report_pdf_bytes, save_pdf_report_file
 
@@ -58,7 +58,7 @@ class SequencePredictAPIView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        prediction = InferenceService().predict(cleaned_sequence)
+        prediction = get_inference_service().predict(cleaned_sequence)
 
         record = Sequence.objects.create(
             seq_id=f'SEQ-{uuid4().hex[:10].upper()}',
