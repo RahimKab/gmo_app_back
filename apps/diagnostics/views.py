@@ -169,7 +169,7 @@ class UserPredictionLatestDetailAPIView(APIView):
         )
 
         if latest_prediction is None or not hasattr(latest_prediction, 'report'):
-            return Response({'detail': 'No report found for this sequence.'}, status=status.HTTP_404_NOT_FOUND)
+            return Response({'detail': 'Rapport introuvable.'}, status=status.HTTP_404_NOT_FOUND)
 
         report = latest_prediction.report
         response_payload = {

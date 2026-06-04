@@ -14,10 +14,10 @@ class SequenceCreateSerializer(serializers.Serializer):
         has_file = bool(attrs.get('file'))
 
         if not has_sequence and not has_file:
-            raise serializers.ValidationError('Choisissez une seule source: sequence brute ou fichier.')
+            raise serializers.ValidationError('Choisissez une seule source: sequence texte ou fichier.')
 
         if has_sequence and has_file:
-            raise serializers.ValidationError('Vous devez choisir soit la sequence brute, soit le fichier, pas les deux.')
+            raise serializers.ValidationError('Vous devez choisir soit la sequence texte, soit le fichier, pas les deux.')
 
         return attrs
 
