@@ -77,6 +77,21 @@ class InferenceAttentionTests(SimpleTestCase):
 
 		self.assertEqual(len(attention), 21)
 
+	def test_occlusion_ranks_windows_by_probability_drop(self):
+		def predictor(sequence):
+			probability = 0.8 if 'G' in sequence[:32] else 0.2
+			return {'probabilities': {'gmo': probability}}
+
+		attention = self.service._build_occlusion_segments(
+			'G' * 32 + 'A' * 32,
+			0.8,
+			predictor,
+		)
+
+		self.assertEqual(attention[0]['start'], 0)
+		self.assertGreater(attention[0]['impact'], 0)
+		self.assertEqual(attention[0]['score'], abs(attention[0]['impact']))
+
 
 class InferenceChunkingTests(SimpleTestCase):
 	def setUp(self):

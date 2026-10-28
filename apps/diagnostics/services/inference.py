@@ -14,6 +14,9 @@ UNCERTAINTY_LOW = 0.30
 UNCERTAINTY_HIGH = 0.70
 MAX_LENGTH = 512
 INFERENCE_CHUNK_SIZE = 2048
+EXPLANATION_WINDOW_SIZE = 32
+EXPLANATION_STRIDE = 16
+MAX_EXPLANATION_SEGMENTS = 8
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 
@@ -56,20 +59,36 @@ class InferenceService:
                 'in_uncertainty_zone': False,
             }
 
-        if self._ensure_model_loaded():
-            predictor = self._predict_with_model
+        model_loaded = self._ensure_model_loaded()
+        if model_loaded:
+            predictor = lambda value: self._predict_with_model(value, explain=False)
         else:
             predictor = self._predict_with_fallback
 
         if len(sequence) <= INFERENCE_CHUNK_SIZE:
-            return predictor(sequence)
+            result = predictor(sequence)
+            if model_loaded:
+                result['attention'] = self._build_occlusion_segments(
+                    sequence,
+                    result['probabilities']['gmo'],
+                    predictor,
+                )
+            return result
 
-        return self._predict_in_chunks(sequence, predictor)
+        explanation_builder = (
+            lambda chunk, baseline: self._build_occlusion_segments(
+                chunk, baseline, predictor
+            )
+            if model_loaded
+            else None
+        )
+        return self._predict_in_chunks(sequence, predictor, explanation_builder)
 
     def _predict_in_chunks(
         self,
         sequence: str,
         predictor: Any,
+        explanation_builder: Any = None,
     ) -> Dict[str, Any]:
         chunks = [
             sequence[start:start + INFERENCE_CHUNK_SIZE]
@@ -88,8 +107,25 @@ class InferenceService:
         score = gmo_probability if label == 'gmo' else no_gmo_probability
 
         attention: List[Dict[str, Any]] = []
-        if reported_gmo_probability > 0:
-            for offset, result in zip(range(0, len(sequence), INFERENCE_CHUNK_SIZE), predictions):
+        if explanation_builder is not None:
+            for offset, result, chunk in zip(
+                range(0, len(sequence), INFERENCE_CHUNK_SIZE),
+                predictions,
+                chunks,
+            ):
+                for segment in explanation_builder(chunk, result['probabilities']['gmo']):
+                    attention.append(
+                        {
+                            **segment,
+                            'start': segment['start'] + offset,
+                            'end': segment['end'] + offset,
+                        }
+                    )
+        elif reported_gmo_probability > 0:
+            for offset, result in zip(
+                range(0, len(sequence), INFERENCE_CHUNK_SIZE),
+                predictions,
+            ):
                 for segment in result['attention']:
                     attention.append(
                         {
@@ -170,7 +206,11 @@ class InferenceService:
             LOGGER.exception(self._load_error)
             return False
 
-    def _predict_with_model(self, sequence: str) -> Dict[str, Any]:
+    def _predict_with_model(
+        self,
+        sequence: str,
+        explain: bool = True,
+    ) -> Dict[str, Any]:
         assert self._encoder is not None
         assert self._classifier is not None
         assert self._tokenizer is not None
@@ -208,9 +248,14 @@ class InferenceService:
                 'gmo': reported_gmo_prob,
                 'no_gmo': reported_no_gmo_prob,
             },
-            'attention': self._build_attention_segments(
-                sequence.upper(),
-                reported_gmo_prob,
+            'attention': (
+                self._build_occlusion_segments(
+                    sequence,
+                    reported_gmo_prob,
+                    lambda value: self._predict_with_model(value, explain=False),
+                )
+                if explain
+                else []
             ),
             'chunks_processed': 1,
             'in_uncertainty_zone': in_uncertainty_zone,
@@ -317,6 +362,44 @@ class InferenceService:
             )
 
         return sorted(segments, key=lambda item: item['score'], reverse=True)
+
+    def _build_occlusion_segments(
+        self,
+        sequence: str,
+        baseline_gmo_probability: float,
+        predictor: Any,
+    ) -> List[Dict[str, Any]]:
+        """Estimate causal influence by masking each window and re-running the model."""
+        effective_sequence = sequence.upper()[:MAX_LENGTH]
+        if not effective_sequence or baseline_gmo_probability <= 0:
+            return []
+
+        segments: List[Dict[str, Any]] = []
+        window_size = min(EXPLANATION_WINDOW_SIZE, len(effective_sequence))
+        for start in range(0, len(effective_sequence), EXPLANATION_STRIDE):
+            end = min(start + window_size, len(effective_sequence))
+            masked_sequence = (
+                effective_sequence[:start]
+                + 'N' * (end - start)
+                + effective_sequence[end:]
+            )
+            masked_probability = predictor(masked_sequence)['probabilities']['gmo']
+            impact = baseline_gmo_probability - masked_probability
+            segments.append(
+                {
+                    'start': start,
+                    'end': end,
+                    'sequence': effective_sequence[start:end],
+                    'score': round(abs(impact), 4),
+                    'impact': round(impact, 4),
+                }
+            )
+
+        return sorted(
+            segments,
+            key=lambda item: item['score'],
+            reverse=True,
+        )[:MAX_EXPLANATION_SEGMENTS]
 
 
 _INFERENCE_SERVICE: Optional[InferenceService] = None

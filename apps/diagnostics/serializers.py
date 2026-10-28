@@ -52,6 +52,7 @@ class AttentionSegmentSerializer(serializers.Serializer):
     end = serializers.IntegerField()
     sequence = serializers.CharField()
     score = serializers.FloatField()
+    impact = serializers.FloatField(required=False)
 
 
 class ProbabilitySerializer(serializers.Serializer):
