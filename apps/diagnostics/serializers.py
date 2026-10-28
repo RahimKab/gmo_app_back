@@ -68,6 +68,20 @@ class SequencePredictionResponseSerializer(serializers.Serializer):
     chunks_processed = serializers.IntegerField(default=1)
 
 
+class SequencePredictionBatchItemSerializer(serializers.Serializer):
+    sequence = SequenceSerializer()
+    prediction = PredictionSerializer()
+    predicted_label = serializers.CharField()
+    probabilities = ProbabilitySerializer()
+    attention = AttentionSegmentSerializer(many=True)
+    chunks_processed = serializers.IntegerField(default=1)
+
+
+class SequencePredictionBatchResponseSerializer(serializers.Serializer):
+    count = serializers.IntegerField()
+    results = SequencePredictionBatchItemSerializer(many=True)
+
+
 class ReportSerializer(serializers.ModelSerializer):
     class Meta:
         model = Report

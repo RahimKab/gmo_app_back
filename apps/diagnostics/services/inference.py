@@ -1,4 +1,6 @@
+import importlib.util
 import logging
+import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -10,7 +12,8 @@ LOGGER = logging.getLogger(__name__)
 DECISION_THRESHOLD = 0.50
 UNCERTAINTY_LOW = 0.30
 UNCERTAINTY_HIGH = 0.70
-MAX_LENGTH = 1024
+MAX_LENGTH = 512
+INFERENCE_CHUNK_SIZE = 2048
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 
@@ -18,15 +21,29 @@ class InferenceService:
     """Run GMO classification with local artifacts and graceful fallback."""
 
     def __init__(self):
-        # Keep path unchanged for this project.
         self.model_dir = Path(settings.ML_MODEL_DIR) / 'gmo_model'
+        self.encoder_dir = self.model_dir / 'encoder'
+        self.classifier_path = self.model_dir / 'classifier_head.pt'
         self.device = DEVICE
-        self._model: Optional[Any] = None
+        self._encoder: Optional[Any] = None
+        self._classifier: Optional[Any] = None
         self._tokenizer: Optional[Any] = None
         self._load_error: Optional[str] = None
 
     def warm_up(self) -> bool:
         return self._ensure_model_loaded()
+
+    def get_load_status(self) -> Dict[str, Any]:
+        return {
+            'loaded': (
+                self._encoder is not None
+                and self._classifier is not None
+                and self._tokenizer is not None
+            ),
+            'device': self.device,
+            'model_dir': str(self.model_dir),
+            'error': self._load_error,
+        }
 
     def predict(self, sequence: str) -> Dict[str, Any]:
         if not sequence:
@@ -40,79 +57,113 @@ class InferenceService:
             }
 
         if self._ensure_model_loaded():
-            return self._predict_with_model(sequence)
+            predictor = self._predict_with_model
+        else:
+            predictor = self._predict_with_fallback
 
-        return self._predict_with_fallback(sequence)
+        if len(sequence) <= INFERENCE_CHUNK_SIZE:
+            return predictor(sequence)
+
+        return self._predict_in_chunks(sequence, predictor)
+
+    def _predict_in_chunks(
+        self,
+        sequence: str,
+        predictor: Any,
+    ) -> Dict[str, Any]:
+        chunks = [
+            sequence[start:start + INFERENCE_CHUNK_SIZE]
+            for start in range(0, len(sequence), INFERENCE_CHUNK_SIZE)
+        ]
+        predictions = [predictor(chunk) for chunk in chunks]
+        total_length = len(sequence)
+        gmo_probability = sum(
+            result['probabilities']['gmo'] * len(chunk)
+            for result, chunk in zip(predictions, chunks)
+        ) / total_length
+        no_gmo_probability = 1 - gmo_probability
+        reported_gmo_probability = round(gmo_probability, 4)
+        reported_no_gmo_probability = round(no_gmo_probability, 4)
+        label = 'gmo' if gmo_probability >= DECISION_THRESHOLD else 'no-gmo'
+        score = gmo_probability if label == 'gmo' else no_gmo_probability
+
+        attention: List[Dict[str, Any]] = []
+        if reported_gmo_probability > 0:
+            for offset, result in zip(range(0, len(sequence), INFERENCE_CHUNK_SIZE), predictions):
+                for segment in result['attention']:
+                    attention.append(
+                        {
+                            **segment,
+                            'start': segment['start'] + offset,
+                            'end': segment['end'] + offset,
+                        }
+                    )
+
+        return {
+            'label': label,
+            'score': round(score, 4),
+            'probabilities': {
+                'gmo': reported_gmo_probability,
+                'no_gmo': reported_no_gmo_probability,
+            },
+            'attention': sorted(attention, key=lambda item: item['score'], reverse=True),
+            'chunks_processed': len(chunks),
+            'in_uncertainty_zone': UNCERTAINTY_LOW <= gmo_probability <= UNCERTAINTY_HIGH,
+        }
 
     def _ensure_model_loaded(self) -> bool:
-        if self._model is not None and self._tokenizer is not None:
+        if (
+            self._encoder is not None
+            and self._classifier is not None
+            and self._tokenizer is not None
+        ):
             return True
 
         if self._load_error:
             return False
 
         try:
-            from transformers import AutoModelForSequenceClassification, AutoTokenizer
+            from transformers import AutoTokenizer
         except Exception as exc:
             self._load_error = f'Model dependencies unavailable: {exc}'
             LOGGER.warning(self._load_error)
             return False
 
         try:
-            config_path = self.model_dir / 'config.pt'
-            encoder_path = self.model_dir / 'encoder'
-            tokenizer_path = self.model_dir / 'tokenizer'
-
-            for required_path in [encoder_path, tokenizer_path]:
+            required_files = [
+                self.encoder_dir / 'config.json',
+                self.encoder_dir / 'model.safetensors',
+                self.classifier_path,
+                self.model_dir / 'tokenizer_config.json',
+                self.model_dir / 'vocab.txt',
+            ]
+            for required_path in required_files:
                 if not required_path.exists():
                     self._load_error = f'Missing model artifact: {required_path}'
                     LOGGER.warning(self._load_error)
                     return False
 
-            model_name = 'Unknown'
-            if config_path.exists():
-                try:
-                    config = torch.load(str(config_path), map_location=self.device, weights_only=False)
-                    model_name = config.get('model_name', 'Unknown')
-                except Exception:
-                    LOGGER.warning('Could not read model config at %s', config_path)
+            encoder = self._load_encoder()
+            tokenizer = AutoTokenizer.from_pretrained(
+                str(self.model_dir),
+                trust_remote_code=True,
+                local_files_only=True,
+            )
 
-            try:
-                model = AutoModelForSequenceClassification.from_pretrained(
-                    str(encoder_path),
-                    trust_remote_code=True,
-                    local_files_only=True,
-                )
-            except Exception:
-                model = AutoModelForSequenceClassification.from_pretrained(
-                    str(encoder_path),
-                    trust_remote_code=False,
-                    local_files_only=True,
-                )
-                LOGGER.warning(
-                    'Model loaded with ignore_mismatched_sizes=True. '
-                    'Please regenerate artifacts for best accuracy.'
-                )
+            classifier_state = torch.load(
+                self.classifier_path,
+                map_location=self.device,
+                weights_only=True,
+            )
+            classifier = torch.nn.Linear(encoder.config.hidden_size, 2)
+            classifier.load_state_dict(classifier_state, strict=True)
+            classifier.to(self.device)
+            classifier.eval()
 
-            model.to(self.device)
-            model.eval()
-
-            try:
-                tokenizer = AutoTokenizer.from_pretrained(
-                    str(tokenizer_path),
-                    trust_remote_code=True,
-                    local_files_only=True,
-                )
-            except Exception:
-                tokenizer = AutoTokenizer.from_pretrained(
-                    str(tokenizer_path),
-                    trust_remote_code=False,
-                    local_files_only=True,
-                )
-
-            self._model = model
+            self._encoder = encoder
+            self._classifier = classifier
             self._tokenizer = tokenizer
-            LOGGER.info('GMO classification model loaded from %s (model=%s)', self.model_dir, model_name)
+            LOGGER.info('GMO classification model loaded from %s on %s', self.model_dir, self.device)
             return True
         except Exception as exc:
             self._load_error = f'Impossible to load GMO model: {exc}'
@@ -120,7 +171,8 @@ class InferenceService:
             return False
 
     def _predict_with_model(self, sequence: str) -> Dict[str, Any]:
-        assert self._model is not None
+        assert self._encoder is not None
+        assert self._classifier is not None
         assert self._tokenizer is not None
 
         tokens = self._tokenizer(
@@ -133,14 +185,17 @@ class InferenceService:
         tokens = {k: v.to(self.device) for k, v in tokens.items()}
 
         with torch.no_grad():
-            outputs = self._model(
-                input_ids=tokens['input_ids'],
-                attention_mask=tokens['attention_mask'],
+            outputs = self._encoder(**tokens)
+            pooled = self._masked_mean_pool(
+                outputs.last_hidden_state,
+                tokens['attention_mask'],
             )
-            probs = functional.softmax(outputs.logits, dim=1)
+            probs = functional.softmax(self._classifier(pooled), dim=1)
 
         gmo_prob = float(probs[0, 1].item())
         no_gmo_prob = float(probs[0, 0].item())
+        reported_gmo_prob = round(gmo_prob, 4)
+        reported_no_gmo_prob = round(no_gmo_prob, 4)
         in_uncertainty_zone = UNCERTAINTY_LOW <= gmo_prob <= UNCERTAINTY_HIGH
 
         label = 'gmo' if gmo_prob >= DECISION_THRESHOLD else 'no-gmo'
@@ -150,13 +205,57 @@ class InferenceService:
             'label': label,
             'score': round(score, 4),
             'probabilities': {
-                'gmo': round(gmo_prob, 4),
-                'no_gmo': round(no_gmo_prob, 4),
+                'gmo': reported_gmo_prob,
+                'no_gmo': reported_no_gmo_prob,
             },
-            'attention': self._fallback_attention_segments(sequence.upper()),
+            'attention': self._build_attention_segments(
+                sequence.upper(),
+                reported_gmo_prob,
+            ),
             'chunks_processed': 1,
             'in_uncertainty_zone': in_uncertainty_zone,
         }
+
+    def _load_encoder(self) -> Any:
+        """Load the custom ESM encoder used to produce the saved classifier features."""
+        source_candidates = [
+            self.encoder_dir / 'modeling_esm.py',
+            self.model_dir / 'modeling_esm.py',
+            self.model_dir.parent / 'gmo_model_old' / 'modeling_esm.py',
+        ]
+        source_path = next((path for path in source_candidates if path.exists()), None)
+        if source_path is None:
+            raise FileNotFoundError(
+                'Custom ESM implementation not found. Expected modeling_esm.py '
+                f'next to the encoder or in {self.model_dir.parent / "gmo_model_old"}.'
+            )
+
+        module_name = f'_gmo_modeling_esm_{id(self)}'
+        module_spec = importlib.util.spec_from_file_location(
+            module_name,
+            source_path,
+            submodule_search_locations=[str(source_path.parent)],
+        )
+        if module_spec is None or module_spec.loader is None:
+            raise ImportError(f'Unable to import custom ESM implementation from {source_path}')
+
+        module = importlib.util.module_from_spec(module_spec)
+        sys.modules[module_name] = module
+        module_spec.loader.exec_module(module)
+        encoder = module.EsmModel.from_pretrained(
+            str(self.encoder_dir),
+            add_pooling_layer=False,
+            local_files_only=True,
+        )
+        encoder.to(self.device)
+        encoder.eval()
+        return encoder
+
+    @staticmethod
+    def _masked_mean_pool(hidden_states: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
+        mask = attention_mask.unsqueeze(-1).to(hidden_states.dtype)
+        summed = (hidden_states * mask).sum(dim=1)
+        return summed / mask.sum(dim=1).clamp_min(1)
 
     def _predict_with_fallback(self, sequence: str) -> Dict[str, Any]:
         gc_count = sequence.count('G') + sequence.count('C')
@@ -175,7 +274,7 @@ class InferenceService:
                 'gmo': round(gmo_probability, 4),
                 'no_gmo': round(no_gmo_probability, 4),
             },
-            'attention': self._fallback_attention_segments(sequence),
+            'attention': self._build_attention_segments(sequence, round(gmo_probability, 4)),
             'chunks_processed': 1,
             'in_uncertainty_zone': UNCERTAINTY_LOW <= gmo_probability <= UNCERTAINTY_HIGH,
         }
@@ -184,7 +283,15 @@ class InferenceService:
         motifs = ('CAAT', 'TATA', 'GCGC', 'CCGG', 'GGCC')
         return sum(sequence.count(motif) for motif in motifs)
 
-    def _fallback_attention_segments(self, sequence: str) -> List[Dict[str, Any]]:
+    def _build_attention_segments(
+        self,
+        sequence: str,
+        gmo_probability: float,
+    ) -> List[Dict[str, Any]]:
+        """Explain GMO evidence only when the reported GMO rate is non-zero."""
+        if gmo_probability <= 0:
+            return []
+
         window_size = min(18, max(8, len(sequence) // 6 or 8))
         stride = max(4, window_size // 2)
         segments: List[Dict[str, Any]] = []
@@ -209,8 +316,7 @@ class InferenceService:
                 }
             )
 
-        ranked = sorted(segments, key=lambda item: item['score'], reverse=True)
-        return ranked[:6]
+        return sorted(segments, key=lambda item: item['score'], reverse=True)
 
 
 _INFERENCE_SERVICE: Optional[InferenceService] = None

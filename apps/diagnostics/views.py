@@ -10,13 +10,16 @@ from rest_framework.views import APIView
 from .models import Prediction, Report, Sequence
 from .serializers import (
     SequenceCreateSerializer,
-    SequencePredictionResponseSerializer,
+    SequencePredictionBatchResponseSerializer,
     SequenceSerializer,
     UserPredictionDetailSerializer,
     UserPredictionSummarySerializer,
 )
 from .services.inference import get_inference_service
-from .services.preprocess import clean_sequence, extract_sequence_from_text
+from .services.preprocess import (
+    extract_sequences_from_text,
+    is_supported_sequence_filename,
+)
 from .services.report_pdf import build_report_pdf_bytes, save_pdf_report_file
 
 
@@ -40,6 +43,11 @@ class SequencePredictAPIView(APIView):
         if uploaded_file:
             input_filename = uploaded_file.name
             lower_name = input_filename.lower()
+            if not is_supported_sequence_filename(input_filename):
+                return Response(
+                    {'detail': 'Format non supporte. Utilisez un fichier FASTA, FNA ou TXT.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
             source_type = Sequence.SOURCE_FASTA if lower_name.endswith('.fasta') else Sequence.SOURCE_FNA if lower_name.endswith('.fna') else Sequence.SOURCE_RAW
             sequence_name = input_filename.rsplit('.', 1)[0]
             sequence = uploaded_file.read().decode('utf-8', errors='ignore')
@@ -49,75 +57,85 @@ class SequencePredictAPIView(APIView):
 
         current_name = seq_nom_courant or input_filename or sequence_name
 
-        extracted_sequence = extract_sequence_from_text(sequence)
-        cleaned_sequence = clean_sequence(extracted_sequence)
+        cleaned_sequences = extract_sequences_from_text(sequence)
 
-        if not cleaned_sequence:
+        if not cleaned_sequences:
             return Response(
                 {'detail': 'La sequence est inutilisable.'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        prediction = get_inference_service().predict(cleaned_sequence)
+        results = []
 
-        record = Sequence.objects.create(
-            seq_id=f'SEQ-{uuid4().hex[:10].upper()}',
-            seq_nom=sequence_name,
-            seq_nom_courant=current_name,
-            sequence=sequence,
-            sequence_cleaned=cleaned_sequence,
-            seq_lien='',
-            type_entree=source_type,
-            user=request.user,
-        )
+        for index, cleaned_sequence in enumerate(cleaned_sequences, start=1):
+            prediction = get_inference_service().predict(cleaned_sequence)
+            suffix = f' #{index}' if len(cleaned_sequences) > 1 else ''
 
-        prediction_record = Prediction.objects.create(
-            sequence=record,
-            pred_libelle=prediction['label'],
-            pred_prob=prediction['probabilities']['gmo'],
-            pred_confiance=prediction['score'],
-        )
+            record = Sequence.objects.create(
+                seq_id=f'SEQ-{uuid4().hex[:10].upper()}',
+                seq_nom=f'{sequence_name}{suffix}',
+                seq_nom_courant=f'{current_name}{suffix}',
+                sequence=cleaned_sequence,
+                sequence_cleaned=cleaned_sequence,
+                seq_lien='',
+                type_entree=source_type,
+                user=request.user,
+            )
 
-        report_payload = {
-            'sequence_name': record.seq_nom_courant or record.seq_nom,
-            'seq_id': record.seq_id,
-            'predicted_label': prediction['label'],
-            'score': prediction['score'],
-            'gmo_probability': prediction['probabilities']['gmo'],
-            'no_gmo_probability': prediction['probabilities']['no_gmo'],
-            'chunks_processed': prediction.get('chunks_processed', 1),
-            'attention': prediction['attention'],
-            'sequence_cleaned': cleaned_sequence,
-        }
-        pdf_bytes = build_report_pdf_bytes(report_payload)
-        file_name = f"report-{record.seq_id}-{prediction_record.prediction_id}.pdf"
-        pdf_url = save_pdf_report_file(file_name, pdf_bytes)
-        absolute_pdf_url = request.build_absolute_uri(pdf_url)
+            prediction_record = Prediction.objects.create(
+                sequence=record,
+                pred_libelle=prediction['label'],
+                pred_prob=prediction['probabilities']['gmo'],
+                pred_confiance=prediction['score'],
+            )
 
-        Report.objects.create(
-            prediction=prediction_record,
-            predicted_label=prediction['label'],
-            gmo_probability=prediction['probabilities']['gmo'],
-            no_gmo_probability=prediction['probabilities']['no_gmo'],
-            attention=prediction['attention'],
-            chunks_processed=prediction.get('chunks_processed', 1),
-            pdf_path=absolute_pdf_url,
-        )
+            report_payload = {
+                'sequence_name': record.seq_nom_courant or record.seq_nom,
+                'seq_id': record.seq_id,
+                'predicted_label': prediction['label'],
+                'score': prediction['score'],
+                'gmo_probability': prediction['probabilities']['gmo'],
+                'no_gmo_probability': prediction['probabilities']['no_gmo'],
+                'chunks_processed': prediction.get('chunks_processed', 1),
+                'attention': prediction['attention'],
+                'sequence_cleaned': cleaned_sequence,
+            }
+            pdf_bytes = build_report_pdf_bytes(report_payload)
+            file_name = f"report-{record.seq_id}-{prediction_record.prediction_id}.pdf"
+            pdf_url = save_pdf_report_file(file_name, pdf_bytes)
+            absolute_pdf_url = request.build_absolute_uri(pdf_url)
 
-        record.seq_lien = absolute_pdf_url
-        record.save(update_fields=['seq_lien'])
+            Report.objects.create(
+                prediction=prediction_record,
+                predicted_label=prediction['label'],
+                gmo_probability=prediction['probabilities']['gmo'],
+                no_gmo_probability=prediction['probabilities']['no_gmo'],
+                attention=prediction['attention'],
+                chunks_processed=prediction.get('chunks_processed', 1),
+                pdf_path=absolute_pdf_url,
+            )
+
+            record.seq_lien = absolute_pdf_url
+            record.save(update_fields=['seq_lien'])
+
+            results.append(
+                {
+                    'sequence': record,
+                    'prediction': prediction_record,
+                    'predicted_label': prediction['label'],
+                    'probabilities': prediction['probabilities'],
+                    'attention': prediction['attention'],
+                    'chunks_processed': prediction.get('chunks_processed', 1),
+                }
+            )
 
         response_payload = {
-            'sequence': record,
-            'prediction': prediction_record,
-            'predicted_label': prediction['label'],
-            'probabilities': prediction['probabilities'],
-            'attention': prediction['attention'],
-            'chunks_processed': prediction.get('chunks_processed', 1),
+            'count': len(results),
+            'results': results,
         }
 
         return Response(
-            SequencePredictionResponseSerializer(response_payload).data,
+            SequencePredictionBatchResponseSerializer(response_payload).data,
             status=status.HTTP_201_CREATED,
         )
 

@@ -5,6 +5,10 @@ dependencies:
   - python=3.11
   - pip
   - pip:
+      - python-decouple==3.8
+      - django-cors-headers==4.7.0
+      - djangorestframework==3.16.1
+      - psycopg2-binary==2.9.10
       - transformers==4.57.3
       - bio==1.8.1
       - biopython==1.86

@@ -4,3 +4,4 @@ __pycache__/
 db.sqlite3
 .venv/
 model_artifacts/
+media/reports/*.pdf

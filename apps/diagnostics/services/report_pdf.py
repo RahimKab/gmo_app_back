@@ -72,7 +72,7 @@ def build_report_pdf_bytes(payload: Dict[str, Any]) -> bytes:
     now = datetime.datetime.utcnow().strftime('%d-%m-%Y %H:%M')
 
     parsed_attention: List[Dict[str, Any]] = []
-    for item in attention[:6]:
+    for item in attention if gmo > 0 else []:
         start = int(item.get('start', 0))
         end = int(item.get('end', 0))
         att_score = _clamp(float(item.get('score', 0.0)), 0.0, 1.0)
@@ -131,14 +131,17 @@ def build_report_pdf_bytes(payload: Dict[str, Any]) -> bytes:
     attention_x = 317
     attention_width = 150
     row_top = 624
-    for idx, item in enumerate(parsed_attention[:5], start=0):
-        y = row_top - (idx * 20)
+    row_step = min(20, max(8, 100 / max(len(parsed_attention), 1)))
+    bar_height = min(8, max(3, row_step - 2))
+    text_size = 8 if row_step >= 12 else 6
+    for idx, item in enumerate(parsed_attention, start=0):
+        y = row_top - (idx * row_step)
         seg_label = f"{item['start']}-{item['end']}"
         seg_score = float(item['score'])
-        _pdf_text(commands, attention_x, y, seg_label, size=8, color=(0.28, 0.36, 0.5))
-        _pdf_rect(commands, attention_x + 55, y - 1, attention_width, 8, fill=(0.9, 0.92, 0.96))
-        _pdf_rect(commands, attention_x + 55, y - 1, attention_width * seg_score, 8, fill=(0.95, 0.68, 0.24))
-        _pdf_text(commands, attention_x + 55 + attention_width + 4, y - 1, f'{seg_score * 100:.1f}%', size=8)
+        _pdf_text(commands, attention_x, y, seg_label, size=text_size, color=(0.28, 0.36, 0.5))
+        _pdf_rect(commands, attention_x + 55, y - 1, attention_width, bar_height, fill=(0.9, 0.92, 0.96))
+        _pdf_rect(commands, attention_x + 55, y - 1, attention_width * seg_score, bar_height, fill=(0.95, 0.68, 0.24))
+        _pdf_text(commands, attention_x + 55 + attention_width + 4, y - 1, f'{seg_score * 100:.1f}%', size=text_size)
 
     # Aperçu de la séquence avec mise en évidence des intervalles d'attention.
     _pdf_rect(commands, 38, 18, 519, 512, fill=(0.99, 1.0, 0.99), stroke=(0.72, 0.85, 0.74))
